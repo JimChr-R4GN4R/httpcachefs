@@ -118,8 +118,8 @@ result = reader.execute_sql("""
 Fetches all rows for a specific partition value with optional column selection. More efficient than `execute_sql()` for single-value lookups. Returns a PyArrow Table.
 
 ```python
-aapl_data   = reader.query('VALUE')
-aapl_prices = reader.query('VALUE', columns=['date', 'score'])
+data   = reader.query('VALUE')
+data = reader.query('VALUE', columns=['date', 'score'])
 ```
 
 ### `close() -> None`
