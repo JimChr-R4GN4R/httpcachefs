@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Union, List, Optional
 import sqlglot
@@ -81,27 +82,76 @@ def extract_partition_column(sql: str) -> Optional[str]:
     except Exception:
         return None
 
-def atomic_write(path: Path, content: Union[str, bytes]):
+def atomic_write(path: Path, content: Union[str, bytes], max_retries: int = 3):
     """Write content to a file atomically using temp file and rename.
+    
+    Handles Windows file locking issues with retry logic and exponential backoff.
     
     Args:
         path: Target file path
         content: Content to write (str or bytes)
+        max_retries: Maximum number of retry attempts for file locking issues
     Raises:
-        Exception: If write or rename fails (temp file cleanup attempted)
+        Exception: If write or rename fails after all retries (temp file cleanup attempted)
     """
     temp_path = path.with_suffix(".tmp")
     mode = "wb" if isinstance(content, bytes) else "w"
     
-    try:
-        with open(temp_path, mode) as f:
-            f.write(content)
-        temp_path.replace(path)
-    except Exception as e:
-        logger.error(f"Failed to write atomic file {path}: {e}")
-        if temp_path.exists(): 
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            # Ensure parent directory exists
+            path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Clean up stale temp file if it exists
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    # Temp file is locked, continue anyway
+                    pass
+            
+            # Write to temp file
+            with open(temp_path, mode) as f:
+                f.write(content)
+            
+            # Atomic rename with Windows file locking handling
+            temp_path.replace(path)
+            return  # Success
+            
+        except (OSError, PermissionError, FileExistsError) as e:
+            last_error = e
+            # Check if this is a file locking error
+            is_lock_error = (
+                isinstance(e, OSError) and (
+                    "being used by another process" in str(e) or
+                    "Permission denied" in str(e)
+                )
+            )
+            
+            if is_lock_error and attempt < max_retries - 1:
+                # Exponential backoff: 10ms, 20ms, 40ms
+                wait_time = (2 ** attempt) * 0.01
+                logger.debug(f"File lock conflict writing {path}, retrying in {wait_time*1000:.0f}ms (attempt {attempt + 1}/{max_retries})")
+                time.sleep(wait_time)
+                continue
+            else:
+                # Not a lock error or last attempt
+                break
+        except Exception as e:
+            # Other unexpected errors
+            last_error = e
+            break
+    
+    # All retries failed
+    logger.error(f"Failed to write atomic file {path}: {last_error}")
+    if temp_path.exists(): 
+        try:
             temp_path.unlink()
-        raise
+        except OSError:
+            pass  # Couldn't clean up, but log the real error
+    
+    raise last_error if last_error else RuntimeError(f"Failed to write {path}")
 
 def extract_sql_url(sql: str) -> Optional[str]:
     """Extract HTTP/HTTPS URL from SQL FROM clause.
